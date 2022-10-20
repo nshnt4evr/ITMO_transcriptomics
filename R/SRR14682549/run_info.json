@@ -1,0 +1,13 @@
+{
+	"n_targets": 196722,
+	"n_bootstraps": 0,
+	"n_processed": 22341020,
+	"n_pseudoaligned": 4554501,
+	"n_unique": 1889968,
+	"p_pseudoaligned": 20.4,
+	"p_unique": 8.5,
+	"kallisto_version": "0.46.2",
+	"index_version": 10,
+	"start_time": "Wed Oct 19 15:28:08 2022",
+	"call": "kallisto quant -i reference/ref_kallisto_index.idx -o kallisto_out/SRR14682549 raw/SRR14682549_1.fastq raw/SRR14682549_2.fastq"
+}

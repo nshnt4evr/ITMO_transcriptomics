@@ -1,0 +1,268 @@
+---
+title: "DE"
+output: word_document
+date: "2022-10-17"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+----------------------------------------------------------------------
+Raw data was downloaded from GEO: GSE175776
+
+QC performed using FastQC with command:
+find . -name "*.fastq" | xargs -n 1 fastqc -o raw/fastqc_rep
+
+Reference sequence was obtained from Ensembl
+----------------------------------------------------------------------
+Indexing, alignment and quantification - kallisto
+----------------------------------------------------------------------
+
+--------------------------Loading packages----------------------------
+
+```{r}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(version = "3.15")
+
+
+BiocManager::install("tximport")
+BiocManager::install("DESeq2")
+BiocManager::install("clusterProfiler")
+BiocManager::install("rhdf5")
+BiocManager::install("org.Mm.eg.db")
+BiocManager::install("org.Sc.sgd.db")
+BiocManager::install("biomaRt")
+BiocManager::install("EnsDb.Hsapiens.v86")
+
+```
+
+------------------------------Libraries------------------------------
+
+```{r, message=FALSE}
+
+library(ggplot2)
+library(ggrepel)
+library(tidyverse)
+library(tximport)
+library(DESeq2)
+library(clusterProfiler)
+library(pheatmap)
+library(rhdf5)
+library(org.Mm.eg.db)
+library(org.Sc.sgd.db)
+library(RColorBrewer)
+library(biomaRt)
+library(EnsDb.Hsapiens.v86)
+library(AnnotationDbi)
+
+```
+
+----------------Getting tximport data from abundances----------------
+
+```{r, echo=FALSE}
+
+sample_names <- c(paste0("WT_", 1:6), paste0("AT_", 1:6))
+
+kallisto_dirs <- list.dirs(".")%>%str_subset("/SRR")
+
+samples <- data.frame(sample = sample_names,
+                      condition = rep(c("WT", "AT"), 1, each=6),
+                      path = kallisto_dirs)
+
+files <- file.path(samples$path, "abundance.h5") 
+
+txi <- tximport(files, type = 'kallisto', txOut = T)
+
+```
+
+------------------------Creating DESEq object------------------------
+
+```{r}
+
+ddsTxi <- DESeqDataSetFromTximport(txi,
+                                   colData = samples,
+                                   design = ~ condition)
+
+ddsTxi$condition <- relevel(ddsTxi$condition, ref = "WT")
+
+```
+
+----------------------------DESEq2 model----------------------------
+
+```{r}
+
+dds <- DESeq(ddsTxi)
+
+res <- results(dds, name = "condition_AT_vs_WT")
+
+summary(res)
+
+res$tx_id <- rownames(res)%>%str_replace("\\.[0-9]+", "")
+
+res$Gene_symbol <- mapIds(EnsDb.Hsapiens.v86, keys=res$tx_id, column="GENENAME", keytype="TXID")
+
+```
+
+----------------------------Volcano plot----------------------------
+
+```{r}
+
+res_df <- as.data.frame(res)
+
+res_df %>%
+  as.data.frame %>% 
+  ggplot(aes(log2FoldChange, -log10(padj), color = padj < 0.05))+
+  geom_point()+
+  scale_color_manual(values=c("black", "red"))+
+  xlim(c(-8, 8))+
+  ylim(c(0, 15))+
+  geom_text_repel(data=res_df %>% dplyr::filter(padj<1e-10), aes(label=Gene_symbol, color=NULL))
+
+```
+
+-----------------------------PCA plot-----------------------------
+
+```{r}
+
+vsd <- varianceStabilizingTransformation(dds)
+
+plotPCA(vsd, intgroup = "condition")
+
+```
+
+-----------------------Significant DE genes-----------------------
+
+```{r}
+
+sign_results <- res_df %>%
+  mutate(ens_id = Gene_symbol) %>%
+  dplyr::filter(padj < .05)
+
+sign_up <- sign_results %>% dplyr::filter(log2FoldChange > 0)
+sign_dw <- sign_results %>% dplyr::filter(log2FoldChange < 0)
+
+#LINE1 expression level and p-val
+res_df %>% dplyr::filter(res_df$Gene_symbol=="L1TD1")
+
+```
+
+-----------------------------Heatmap-----------------------------
+
+```{r}
+
+select <- order(rowMeans(counts(dds,normalized=TRUE)),
+                decreasing=TRUE)[1:100]
+df <- as.data.frame(colData(dds)["condition"])
+pheatmap(assay(vsd)[select,], cluster_rows=T, show_rownames=T,
+         cluster_cols=T, annotation_col=df)
+
+```
+
+-------------------------Distance matrix-------------------------
+
+```{r}
+
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vsd$condition
+colnames(sampleDistMatrix) <- vsd$condition
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         color = colors)
+
+```
+
+------------------------------FGSEA------------------------------
+
+```{r}
+
+pathways <- fgsea::gmtPathways("h.all.v2022.1.Hs.symbols.gmt")
+
+ranks_for_gsea <- res %>% 
+  as.data.frame() %>%   
+  na.omit() %>% 
+  arrange(desc(stat)) %>% 
+  pull(stat)
+
+names(ranks_for_gsea) <- res_df %>% na.omit() %>% pull(Gene_symbol)
+
+fgsea_results <- fgsea::fgsea(pathways, ranks_for_gsea)
+
+head(fgsea_results[order(pval), ])
+
+```
+
+
+```{r}
+
+fgsea::plotEnrichment(pathways[["HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY"]], ranks_for_gsea) + labs(title="HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY")
+
+```
+
+-------------------Top Up/Down regulated pathways-------------------
+
+```{r}
+
+topPathwaysUp <- fgsea_results[ES > 0][head(order(pval), n=10), pathway]
+
+topPathwaysDown <- fgsea_results[ES < 0][head(order(pval), n=10), pathway]
+
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+#Run this command in console to see the results
+fgsea::plotGseaTable(pathways[topPathways], ranks_for_gsea, fgsea_results, 
+                     gseaParam=0.5)
+
+```
+
+--------------------------KEGG enrichment--------------------------
+
+```{r}
+
+kegg_sign_up <- sign_up %>%na.omit()
+
+kegg_sign_up$ens_id <- mapIds(EnsDb.Hsapiens.v86, keys=kegg_sign_up$tx_id, column="ENTREZID", keytype="TXID")%>% as.character()
+
+KEGG_enrich <- enrichKEGG(kegg_sign_up$ens_id, keyType="kegg", organism = "hsa")
+
+```
+
+
+
+```{r}
+
+barplot(KEGG_enrich)
+
+```
+
+
+
+```{r}
+
+dotplot(KEGG_enrich)
+
+```
+
+
+
+```{r}
+
+cnetplot(KEGG_enrich)
+
+```
+
+---------------------------GO enrichment---------------------------
+
+```{r}
+
+GO_enrich <- enrichGO(kegg_sign_up$ens_id, "org.Sc.sgd.db", keyType = "ENTREZID", ont = "ALL")
+
+```
